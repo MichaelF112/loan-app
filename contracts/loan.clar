@@ -6,44 +6,52 @@
 (define-constant ERR-NOT-DUE-YET 1005)
 (define-constant ERR-LOAN-ALREADY-ACCEPTED 1006)
 (define-constant ERR-LOAN-ALREADY-DEFAULTED 1007)
+(define-constant ERR-TRANSFER-FAILED 1008)
+(define-constant ERR-COLLATERAL-TRANSFER-FAILED 1009)
 
-(define-constant STATUS-OPEN 0)
-(define-constant STATUS-ACTIVE 1)
-(define-constant STATUS-DEFAULTED 2)
+(define-constant STATUS-OPEN u0)
+(define-constant STATUS-ACTIVE u1)
+(define-constant STATUS-DEFAULTED u2)
 
 (define-map loans
-  loan-id
-  (tuple
-    (principal uint)
-    (collateral uint)
-    (interest-rate uint)
-    (due-block uint)
-    (lender principal)
-    (borrower (option principal))
-    (status uint)))
+  uint  ;; loan-id as a key type (unsigned integer)
+  {
+    principal: uint,
+    collateral: uint,
+    interest-rate: uint,
+    due-block: uint,
+    lender: principal,
+    borrower: (optional principal),
+    status: uint
+  }
+)
 
-(define-public (create-loan (loan-id uint) (principal uint) (interest-rate uint) (due-block uint))
+(define-public (create-loan (loan-id uint) (principal-amount uint) (interest-rate uint) (due-block uint))
   (begin
     (asserts! (is-none (map-get? loans loan-id)) (err ERR-LOAN-EXISTS))
-    (map-insert loans loan-id
-      (tuple
-        (principal principal)
-        (collateral u0)
-        (interest-rate interest-rate)
-        (due-block due-block)
-        (lender tx-sender)
-        (borrower none)
-        (status STATUS-OPEN)))
+    (map-insert loans loan-id 
+    {
+      principal: principal-amount,
+      collateral: u0,
+      interest-rate: interest-rate,
+      due-block: due-block,
+      lender: tx-sender,
+      borrower: none,
+      status: STATUS-OPEN
+    })
     (print {action: "Loan created", loan-id: loan-id, lender: tx-sender})
-    (ok loan-id)))
+    (ok loan-id)
+  )
+)
+
 
 (define-public (accept-loan (loan-id uint) (collateral uint))
   (let ((loan (map-get? loans loan-id)))
     (asserts! (is-some loan) (err ERR-LOAN-NOT-FOUND))
     (let ((loan-details (unwrap-panic loan)))
-      (asserts! (> (get principal loan-details) 0) (err ERR-INSUFFICIENT-COLLATERAL))
+      (asserts! (> (get principal loan-details) u0) (err ERR-INSUFFICIENT-COLLATERAL))
       (asserts! (is-eq (get status loan-details) STATUS-OPEN) (err ERR-LOAN-ALREADY-ACCEPTED))
-      (asserts! (>= collateral (* (get principal loan-details) (/ 20 100))) (err ERR-INSUFFICIENT-COLLATERAL))
+      (asserts! (>= collateral (* (get principal loan-details) (/ u20 u100))) (err ERR-INSUFFICIENT-COLLATERAL))
       (map-set loans loan-id
         (tuple
           (principal (get principal loan-details))
@@ -63,13 +71,17 @@
       (asserts! (is-some (get borrower loan-details)) (err ERR-NOT-BORROWER))
       (asserts! (is-eq (unwrap-panic (get borrower loan-details)) tx-sender) (err ERR-NOT-BORROWER))
       (asserts! (is-eq (get status loan-details) STATUS-ACTIVE) (err ERR-LOAN-ALREADY-DEFAULTED))
-      (let ((total-owed (+ (get principal loan-details) (* (get principal loan-details) (/ 20 100)))))
+      (let ((total-owed (+ (get principal loan-details) (* (get principal loan-details) (/ u20 u100)))))
         (asserts! (>= (stx-get-balance tx-sender) total-owed) (err ERR-INSUFFICIENT-COLLATERAL))
-        (if (is-ok (stx-transfer? total-owed tx-sender (get lender loan-details)))
-          (map-delete loans loan-id)
-          (err ERR-INSUFFICIENT-COLLATERAL))
-        (print {action: "Loan repaid", loan-id: loan-id, borrower: tx-sender})
-        (ok true)))))
+        (match (stx-transfer? total-owed tx-sender (get lender loan-details))
+          transfer-result 
+          (begin 
+            (map-delete loans loan-id)
+            (print {action: "Loan repaid", loan-id: loan-id, borrower: tx-sender})
+            (ok true))
+          transfer-err 
+          (err ERR-TRANSFER-FAILED)))))
+)
 
 (define-public (claim-collateral (loan-id uint))
   (let ((loan (map-get? loans loan-id)))
@@ -79,17 +91,27 @@
       (asserts! (>= block-height (get due-block loan-details)) (err ERR-NOT-DUE-YET))
       (asserts! (is-eq (get status loan-details) STATUS-ACTIVE) (err ERR-LOAN-ALREADY-DEFAULTED))
       (map-set loans loan-id
-        (tuple
-          (principal (get principal loan-details))
-          (collateral (get collateral loan-details))
-          (interest-rate (get interest-rate loan-details))
-          (due-block (get due-block loan-details))
-          (lender (get lender loan-details))
-          (borrower (get borrower loan-details))
-          (status STATUS-DEFAULTED)))
-      (stx-transfer? (get collateral loan-details) tx-sender)
-      (print {action: "Collateral claimed", loan-id: loan-id, lender: tx-sender})
-      (ok true))))
+        {
+          principal: (get principal loan-details),
+          collateral: (get collateral loan-details),
+          interest-rate: (get interest-rate loan-details),
+          due-block: (get due-block loan-details),
+          lender: (get lender loan-details),
+          borrower: (get borrower loan-details),
+          status: STATUS-DEFAULTED
+        })
+      (match (stx-transfer? 
+               (get collateral loan-details) 
+               (unwrap-panic (get borrower loan-details)) 
+               tx-sender)
+        transfer-result 
+        (begin 
+          (print {action: "Collateral claimed", loan-id: loan-id, lender: tx-sender})
+          (ok true))
+        transfer-err 
+        (err ERR-COLLATERAL-TRANSFER-FAILED))
+  ))
+)
 
 (define-public (get-loan-details (loan-id uint))
   (match (map-get? loans loan-id)
